@@ -25,31 +25,45 @@ VOCAB_FILES_NAMES = {"vocab_file": "vocab.txt"}
 class ChronosTokenizerWrapper(PreTrainedTokenizer):
     
     chronos_tokenizer: ChronosTokenizer
+    pad_token: Union[str, AddedToken]
+    eos_token: Union[str, AddedToken]
     pad_token_id: int
     eos_token_id: int
     
     def __init__(self, tokenizer_name: Optional[str]='amazon/chronos-t5-small', **kwargs: Dict[str, Any]):
+        # logging.debug(f'ChronosTokenizerWrapper.__init__(): kwargs == {kwargs}')
         config = AutoConfig.from_pretrained(
             tokenizer_name,
             **kwargs,
         )
-        # device_map = kwargs.get('device_map')  # used for ChronosPipeline
+        
+        for param, value in kwargs.items():
+            if param not in config.chronos_config:
+                raise KeyError(f"{param} is not a valid key for ChronosConfig.")
+            config.chronos_config[param] = value
+        
+        # logging.debug(f'ChronosTokenizerWrapper.__init__(): config == {config}')
+        # logging.debug(f'ChronosTokenizerWrapper.__init__(): config.chronos_config == {config.chronos_config}')
         assert hasattr(config, "chronos_config"), "Not a Chronos config file"
-        chronos_config = ChronosConfig(**config.chronos_config)  # dictionary of content in "chronos_config" of amazon/chronos-t5-{} config.json
-        self.chronos_tokenizer = chronos_config.create_tokenizer()  # type: chronos.chronos.MeanScaleUniformBins
+        chronos_config = ChronosConfig(**config.chronos_config)
+        # logging.debug(f'ChronosTokenizerWrapper.__init__(): chronos_config == {chronos_config}')
+        self.chronos_tokenizer = chronos_config.create_tokenizer()
         # Get the ChronosConfig object with: self.chronos_tokenizer.config
         
         # Initialize PreTrainedTokenizer attributes
-        super().__init__(
-            pad_token=AddedToken(str(self.chronos_tokenizer.config.pad_token_id)), 
-            eos_token=AddedToken(str(self.chronos_tokenizer.config.eos_token_id)), 
-            **kwargs
-        )
+        super().__init__(**kwargs)
+        
+        self.pad_token = AddedToken(str(self.chronos_tokenizer.config.pad_token_id))
+        self.eos_token = AddedToken(str(self.chronos_tokenizer.config.eos_token_id))
+        
+        self.add_special_tokens({
+            'pad_token': self.pad_token,
+            'eos_token': self.eos_token,
+        })
         
         
     def get_vocab(self) -> Dict[float, float]:
         return {token: token_id for token, token_id in zip(self.chronos_tokenizer.centers.tolist(), list(range(self.chronos_tokenizer.config.n_special_tokens, self.chronos_tokenizer.config.n_tokens)))}
-        # return {i.item(): i.item() for i in self.chronos_tokenizer.boundaries}
 
     @property
     def vocab_size(self) -> int:
@@ -58,19 +72,19 @@ class ChronosTokenizerWrapper(PreTrainedTokenizer):
         """
         return self.chronos_tokenizer.config.n_tokens
     
-    # @property
-    # def eos_token_id(self) -> Optional[int]:
-    #     """
-    #     `Optional[int]`: Id of the end of sentence token in the vocabulary.
-    #     """
-    #     return self.chronos_tokenizer.config.eos_token_id
+    @property
+    def eos_token_id(self) -> Optional[int]:
+        """
+        `Optional[int]`: Id of the end of sentence token in the vocabulary.
+        """
+        return self.chronos_tokenizer.config.eos_token_id
     
-    # @property
-    # def pad_token_id(self) -> Optional[int]:
-    #     """
-    #     `Optional[int]`: Id of the padding token in the vocabulary.
-    #     """
-    #     return self.chronos_tokenizer.config.pad_token_id
+    @property
+    def pad_token_id(self) -> Optional[int]:
+        """
+        `Optional[int]`: Id of the padding token in the vocabulary.
+        """
+        return self.chronos_tokenizer.config.pad_token_id
     
     # def _prepare_and_validate_context(self, context: Union[torch.Tensor, List[torch.Tensor]]) -> Union[torch.Tensor, List[torch.Tensor]]:
     #     if isinstance(context, list):
@@ -235,22 +249,27 @@ class ChronosTokenizerWrapper(PreTrainedTokenizer):
     #     return super().prepare_for_tokenization(text=tokens, is_split_into_words=is_split_into_words)
     
     
-    def _to_hf_format(self, entry: Dict[str, Any]) -> Dict[str, Any]:     
-        # Pad horizon to acceptable length - checked in label_input_transform()
-        horizon = entry['future_target']
-        padding = np.full(((self.chronos_tokenizer.config.prediction_length - len(horizon)),), np.nan, dtype=horizon.dtype)
-        entry['future_target'] = np.concatenate([horizon, padding])
+    # def _to_hf_format(self, entry: Dict[str, Any]) -> Dict[str, Any]:     
+    #     # Pad horizon to acceptable length - checked in label_input_transform()
+    #     horizon = entry['future_target']
+    #     padding = np.full(((self.chronos_tokenizer.config.prediction_length - len(horizon)),), np.nan, dtype=horizon.dtype)
+    #     entry['future_target'] = np.concatenate([horizon, padding])
         
-        past_target = torch.tensor(entry["past_target"]).unsqueeze(0)
-        input_ids, attention_mask, scale = self.chronos_tokenizer.context_input_transform(context=past_target)
-        future_target = torch.tensor(entry["future_target"]).unsqueeze(0)
-        labels, labels_mask = self.chronos_tokenizer.label_input_transform(label=future_target, scale=scale)
-        labels[labels_mask == 0] = -100
-        return {
-            "input_ids": input_ids.squeeze(0),
-            "attention_mask": attention_mask.squeeze(0),
-            "labels": labels.squeeze(0),
-        }
+    #     # Change instance variable to surpass "assert" statement in chronos.py label_input_transform()
+    #     # length = entry["future_target"].shape[-1]
+    #     # if length < self.tokenizer.config.prediction_length:
+    #     #     self.tokenizer.config.prediction_length = length
+        
+    #     past_target = torch.tensor(entry["past_target"]).unsqueeze(0)
+    #     input_ids, attention_mask, scale = self.chronos_tokenizer.context_input_transform(context=past_target)
+    #     future_target = torch.tensor(entry["future_target"]).unsqueeze(0)
+    #     labels, labels_mask = self.chronos_tokenizer.label_input_transform(label=future_target, scale=scale)
+    #     labels[labels_mask == 0] = -100
+    #     return {
+    #         "input_ids": input_ids.squeeze(0),
+    #         "attention_mask": attention_mask.squeeze(0),
+    #         "labels": labels.squeeze(0),
+    #     }
     
     # This method will get called is there is a self.tokenizer(...) call in another class, where self.tokenizer has type `ChronosTokenizerWrapper`
     # def __call__(
@@ -322,16 +341,16 @@ class ChronosTokenizerWrapper(PreTrainedTokenizer):
 
 
 
-def left_pad_and_stack_1D(tensors: List[torch.Tensor]) -> torch.Tensor: 
-    max_len = max(len(c) for c in tensors)
-    padded = []
-    for c in tensors:
-        assert isinstance(c, torch.Tensor)
-        assert c.ndim == 1
-        padding = torch.full(
-            size=(max_len - len(c),), fill_value=torch.nan, device=c.device
-        )
-        padded.append(torch.concat((padding, c), dim=-1))
-    return torch.stack(padded)
+# def left_pad_and_stack_1D(tensors: List[torch.Tensor]) -> torch.Tensor: 
+#     max_len = max(len(c) for c in tensors)
+#     padded = []
+#     for c in tensors:
+#         assert isinstance(c, torch.Tensor)
+#         assert c.ndim == 1
+#         padding = torch.full(
+#             size=(max_len - len(c),), fill_value=torch.nan, device=c.device
+#         )
+#         padded.append(torch.concat((padding, c), dim=-1))
+#     return torch.stack(padded)
 
 ChronosTokenizerWrapper.register_for_auto_class()
